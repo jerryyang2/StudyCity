@@ -56,14 +56,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def static(self,path):
         allowed={"/":"index.html","/index.html":"index.html","/app.js":"app.js","/config.js":"config.js",
-                 "/styles.css":"styles.css","/favicon.svg":"favicon.svg","/favicon.ico":"favicon.svg"}
+                 "/styles.css":"styles.css","/favicon.svg":"favicon.svg","/favicon.ico":"favicon.svg",
+                 "/assets/studycity-town.webp":"assets/studycity-town.webp"}
         if path not in allowed: return False
         root=Path(__file__).resolve().parents[1]
         web=root/"Web" if (root/"Web/index.html").is_file() else root/"docs"
         file=web/allowed[path]
         if not file.is_file(): raise APIError(404,"網站資源尚未準備完成。")
         data=file.read_bytes()
-        types={".html":"text/html; charset=utf-8",".js":"text/javascript; charset=utf-8",".css":"text/css; charset=utf-8",".svg":"image/svg+xml"}
+        types={".html":"text/html; charset=utf-8",".js":"text/javascript; charset=utf-8",".css":"text/css; charset=utf-8",".svg":"image/svg+xml",".webp":"image/webp"}
         self.send_response(200); self.send_header("Content-Type",types[file.suffix])
         self.send_header("Content-Length",str(len(data)))
         self.send_header("Content-Security-Policy","default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; frame-src https://docs.google.com; connect-src 'self' https: http://localhost:* http://127.0.0.1:*; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")

@@ -105,7 +105,8 @@ function checkbox(label, name, checked = false) {
   return node("label", "toggle-row", input, node("span", "", label));
 }
 function closeDialog() { if (!state.busy) { $("modal").close(); $("dialog-content").replaceChildren(); } }
-function openDialog(title, content) {
+function openDialog(title, content, kind = "form") {
+  $("modal").dataset.kind = kind;
   $("dialog-title").textContent = title; $("dialog-content").replaceChildren(content);
   if (!$("modal").open) $("modal").showModal();
 }
@@ -159,6 +160,9 @@ function authDialog(register = true, role = "student") {
 }
 function teacherTicketDialog() {
   const content = node("div", "", node("p", "dialog-description", "老師帳號由管理者人工確認開通。申請資料僅供教師身分核對與聯繫，不公開在 GitHub。開通後，你可自行管理教室、任務、商品與獎勵。"));
+  content.append(node("div", "application-summary", node("span", "application-symbol", "S"),
+    node("div", "", node("strong", "", "為你的教室，留一個生長的地方。"),
+      node("p", "", "填寫申請 · 管理者核對 · 開通後自由安排任務與商城"))));
   const configured = window.STUDYCITY_CONFIG?.teacherApplicationURL;
   let url;
   try { url = configured ? new URL(configured) : null; } catch { url = null; }
@@ -173,7 +177,7 @@ function teacherTicketDialog() {
     content.append(notice("私密申請表正在設定中，目前還沒有收件。將收集姓名／稱呼、學校、職務、工作信箱、使用目的與規模，不要求身分證或學生資料。", true));
   }
   content.append(button("已有老師帳號，登入", () => authDialog(false), "secondary full-width"));
-  openDialog("老師帳號開通申請", content);
+  openDialog("老師帳號開通申請", content, "application");
 }
 function createGroupDialog() {
   const family = state.user.role === "parent";
@@ -226,6 +230,8 @@ function groupButton(group) {
 }
 function render() {
   $("landing").hidden = !!state.user; $("workspace").hidden = !state.user;
+  const helpLink = document.querySelector(".header-link");
+  if (helpLink) helpLink.hidden = !!state.user;
   const nav = $("account-nav"); nav.replaceChildren();
   if (!state.user) {
     nav.append(button("登入", () => authDialog(false), "secondary small"), button("建立帳號", () => authDialog(true), "primary small")); return;
