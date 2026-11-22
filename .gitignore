@@ -1,0 +1,11 @@
+.DS_Store
+LocalOnly/
+__pycache__/
+*.pyc
+.env
+.env.*
+*.sqlite
+*.sqlite-*
+*.log
+*.pem
+*.key

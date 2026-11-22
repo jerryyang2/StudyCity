@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="StudyCity 網頁教室，讓老師與家長建立任務、邀請學生，以正向回饋累積學習成果。">
+  <meta name="color-scheme" content="light">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; frame-src https://docs.google.com; connect-src 'self' https: http://localhost:* http://127.0.0.1:*; base-uri 'none'; form-action 'self'">
+  <title>StudyCity 教室｜把每一份努力，看見</title>
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg">
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./config.js" defer></script>
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要內容</a>
+  <header class="topbar">
+    <a class="brand" href="./" aria-label="StudyCity 教室首頁"><img src="./favicon.svg" alt="" width="42" height="42"><span>StudyCity <small>教室</small></span></a>
+    <div id="connection" class="connection" role="status">正在確認教室服務</div>
+    <nav id="account-nav" aria-label="帳號操作"></nav>
+  </header>
+  <div id="local-only-note" class="deployment-note" hidden>老師開通申請已可私密送出；教室登入、學生註冊、任務與積分目前先在本機服務使用。<a href="https://github.com/jerryyang2/StudyCity#readme" target="_blank" rel="noopener noreferrer">查看本機啟動方式</a></div>
+  <main id="main" tabindex="-1">
+    <section id="landing" class="landing">
+      <div class="hero-copy">
+        <p class="eyebrow">一個教室，許多小小的進步</p>
+        <h1>把每一份努力，<br><span>都好好看見。</span></h1>
+        <p class="hero-description">建立教室、安排任務，讓學生用自己的步調完成。<br class="desktop-break">把肯定變成積分，讓進步變得看得見。</p>
+        <div class="hero-actions"><button class="button primary large" id="hero-register">老師申請開通</button><button class="button secondary large" id="hero-join">學生建立帳號</button></div>
+        <p class="hero-note">老師由管理者確認開通；學生以邀請碼加入。</p>
+      </div>
+      <div class="hero-art" aria-hidden="true">
+        <div class="art-caption"><span class="sun"></span>今天，也前進了一點</div>
+        <div class="city-scene"><div class="scene-tree tree-one"></div><div class="scene-house"><i></i><i></i><i></i></div><div class="scene-library"><b></b><i></i><i></i><i></i><i></i><i></i><i></i></div><div class="scene-cafe"><b></b><i></i><i></i></div><div class="scene-tree tree-two"></div><div class="ground"></div></div>
+        <div class="floating-reward"><span class="reward-check">✓</span><div><strong>完成一件小事</strong><small>努力，值得被肯定。</small></div><b>＋10</b></div>
+        <div class="art-footer"><span>LEARN AT YOUR OWN PACE</span><span>慢慢來，也很好。</span></div>
+      </div>
+      <div class="how-it-works">
+        <article><span class="step-icon">▤</span><h2>建立一個教室</h2><p>老師先申請開通，再建立班級並用邀請碼邀請學生。</p></article>
+        <article><span class="step-icon peach">✓</span><h2>一起完成小任務</h2><p>發布任務，學生完成後提交，由建立者確認每一份努力。</p></article>
+        <article><span class="step-icon violet">✧</span><h2>把肯定留下來</h2><p>累積教室積分、兌換獎勵，自願參與屬於教室的排行榜。</p></article>
+      </div>
+    </section>
+    <section id="workspace" class="workspace" hidden>
+      <aside class="sidebar" aria-label="教室導覽"><div id="sidebar-content"></div></aside>
+      <div id="workspace-content" class="workspace-content"></div>
+    </section>
+  </main>
+  <footer class="site-footer"><span>StudyCity 教室</span><span>私人城市與教室積分分開計算。沒有強迫比較，只有自己的進步。</span><button class="text-button" id="service-settings">連線設定</button></footer>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <dialog id="modal" aria-labelledby="dialog-title"><div class="dialog-head"><h2 id="dialog-title"></h2><button id="close-dialog" class="icon-button" aria-label="關閉對話框">×</button></div><div id="dialog-content"></div></dialog>
+</body>
+</html>
