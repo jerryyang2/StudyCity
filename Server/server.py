@@ -78,7 +78,7 @@ class Handler(BaseHTTPRequestHandler):
             host=urlsplit("//"+self.headers.get("Host","")).hostname
             if host not in self.server.allowed_hosts: raise APIError(400,"這個主機名稱尚未設定。")
             if len(path)>300: raise APIError(414,"請求路徑過長。")
-            if self.command=="GET" and path=="/health": return self.reply(200,{"ok":True,"version":1,"service":"StudyCity","capabilities":["submission_feedback_v1"]})
+            if self.command=="GET" and path=="/health": return self.reply(200,{"ok":True,"version":1,"service":"StudyCity","capabilities":["submission_feedback_v1","reward_lifecycle_v1"]})
             if self.command=="GET" and self.static(path): return
             web_mode=self.headers.get("X-StudyCity-Web","")
             if self.headers.get("Origin") and not self.origin_allowed(): raise APIError(403,"這個網站尚未獲服務允許。")
@@ -134,6 +134,7 @@ class Handler(BaseHTTPRequestHandler):
                 if match:=re.fullmatch(r"/products/([\w-]+)/redeem",path): return self.reply(200,service.redeem(user,match[1],data))
                 if match:=re.fullmatch(r"/products/([\w-]+)/update",path): return self.reply(200,service.update_product(user,match[1],data))
                 if match:=re.fullmatch(r"/redemptions/([\w-]+)/fulfill",path): return self.reply(200,service.fulfill(user,match[1]))
+                if match:=re.fullmatch(r"/redemptions/([\w-]+)/cancel",path): return self.reply(200,service.cancel_redemption(user,match[1],data))
                 if match:=re.fullmatch(r"/(tasks|products)/([\w-]+)/archive",path): return self.reply(200,service.archive(user,"task" if match[1]=="tasks" else "product",match[2]))
             raise APIError(404,"找不到這個功能。")
         except APIError as error: self.reply(error.status,{"message":error.message})

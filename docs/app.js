@@ -2,7 +2,7 @@
 
 // 認證權杖只留在此分頁記憶體；同源服務使用 HttpOnly Cookie。
 const $ = (id) => document.getElementById(id);
-const state = { user: null, groups: [], detail: null, groupId: null, tab: "tasks", token: null, busy: false, api: null, ready: false };
+const state = { user: null, groups: [], detail: null, groupId: null, tab: "tasks", token: null, busy: false, api: null, ready: false, redemptionFilter: "all" };
 const roleNames = { teacher: "老師", parent: "家長", student: "學生" };
 const redemptionRequests = new Map();
 let toastTimer;
@@ -63,6 +63,7 @@ async function api(path, data) {
 }
 function clearUser() {
   state.user = null; state.groups = []; state.groupId = null; state.detail = null; state.token = null;
+  state.redemptionFilter = "all";
   redemptionRequests.clear(); render();
 }
 async function refresh() {
@@ -205,6 +206,7 @@ function itemDialog(product = false, existing = null) {
     const payload = { title: data.get("title"), [product ? "price" : "points"]: Number(data.get("points")) };
     if (!product && data.get("due")) payload.due_at = new Date(String(data.get("due"))).getTime() / 1000;
     if (product) Object.assign(payload, { description: data.get("description"), stock: data.get("stock") === "" ? null : Number(data.get("stock")), active: data.has("active") });
+    if (product && existing) payload.expected_stock = existing.stock;
     await api(existing ? `products/${existing.id}/update` : `groups/${state.groupId}/${product ? "products" : "tasks"}`, payload); await refresh();
     toast(product ? "獎勵已上架。" : "任務已發布。");
   });
@@ -217,10 +219,51 @@ function archive(kind, id) {
     () => api(`${kind}/${id}/archive`, {}), true);
 }
 function redeem(product) {
-  confirmDialog("把努力，換成喜歡的獎勵", `使用 ${product.price} 教室積分兌換「${product.title}」。確認後立即扣除積分，由群組建立者提供並確認領取。`, "確認兌換", async () => {
+  formDialog("把努力，換成喜歡的獎勵", `使用 ${product.price} 教室積分兌換「${product.title}」。確認後立即扣除積分，由群組建立者提供並確認領取。`, [], "確認兌換", async () => {
     const key = redemptionRequests.get(product.id) || crypto.randomUUID(); redemptionRequests.set(product.id, key);
-    await api(`products/${product.id}/redeem`, { request_id: key }); redemptionRequests.delete(product.id); toast("兌換成功，可在領取紀錄查看。");
+    // 回覆不確定時沿用同一請求；收到成功回覆後才開始下一次兌換。
+    await api(`products/${product.id}/redeem`, { request_id: key, expected_price: product.price });
+    redemptionRequests.delete(product.id); state.tab = "redemptions"; state.redemptionFilter = "pending";
+    if (await refreshRewardResult()) toast("兌換成功，可在領取紀錄查看。");
   });
+}
+async function refreshRewardResult() {
+  try { await refresh(); return true; }
+  catch {
+    state.detail = null; render();
+    toast("操作已送達服務，但畫面尚未更新。請重新整理查看結果，再進行下一次操作。", true);
+    return false;
+  }
+}
+function supportsRewardLifecycle(detail) { return detail.capabilities?.includes("reward_lifecycle_v1") === true; }
+function redemptionSummary(receipt) {
+  const summary = node("div", "receipt-summary",
+    node("strong", "", receipt.title),
+    node("p", "", `${receipt.alias} · 當時兌換 ${receipt.price} 教室積分`));
+  if (receipt.description) summary.append(node("p", "receipt-description", receipt.description));
+  summary.append(node("p", "receipt-date", `兌換於 ${receiptDate(receipt.created_at)}`));
+  return summary;
+}
+function receiptDate(timestamp) {
+  return new Date(timestamp * 1000).toLocaleString("zh-TW", { dateStyle: "short", timeStyle: "short" });
+}
+function fulfillDialog(receipt) {
+  formDialog("確認這份獎勵已經交付", "請核對學生與獎勵，實際提供後再確認。確認後會保留領取紀錄，不能再取消退還積分。", [], "確認已提供獎勵", async () => {
+    await api(`redemptions/${receipt.id}/fulfill`, {});
+    if (await refreshRewardResult()) toast("已確認提供獎勵，領取紀錄已更新。");
+  }, { extra: redemptionSummary(receipt) });
+}
+function cancelRedemptionDialog(receipt) {
+  const reasonField = field("取消原因", "reason", { multiline: true, help: "請填寫 500 個字元以內的原因，讓學生了解後續安排。只有本人與群組老師／家長能查看。" });
+  const input = reasonField.querySelector("textarea");
+  const counter = node("small", "reason-counter", "0 / 500 字元"); reasonField.append(counter);
+  input.addEventListener("input", () => { counter.textContent = `${Array.from(input.value.trim()).length} / 500 字元`; });
+  formDialog("取消兌換並退還積分", `這份獎勵尚未提供。確認取消後，會退還當時扣除的 ${receipt.price} 教室積分，並保留原因與時間。`, [reasonField], "確認取消並退還積分", async (data) => {
+    const reason = String(data.get("reason") || "").trim();
+    if (!reason || Array.from(reason).length > 500) throw new Error("請填寫 1 到 500 個字元的取消原因。");
+    await api(`redemptions/${receipt.id}/cancel`, { reason });
+    if (await refreshRewardResult()) toast(`已取消兌換並退還 ${receipt.price} 教室積分。`);
+  }, { danger: true, extra: node("div", "", redemptionSummary(receipt), notice("若這次兌換曾扣除限量庫存，且商品目前仍為限量，服務會嘗試回補一份；舊版紀錄、已改為不限量或庫存達上限時不會自動回補，請依實際可提供份數調整。")) });
 }
 function groupButton(group) {
   const element = node("button", `side-button${state.groupId === group.id ? " active" : ""}`, group.name);
@@ -388,9 +431,52 @@ function renderShop(content, d, owner) {
 }
 function renderRedemptions(content, d, owner) {
   content.append(node("div", "section-heading", node("h2", "", "每一份獎勵，好好交到手上")));
-  if (!d.redemptions.length) { content.append(empty("目前沒有領取紀錄", "兌換商城獎勵後，會在這裡記錄進度。")); return; }
-  for (const r of d.redemptions) content.append(node("article", "list-card", node("div", "", node("h3", "", r.title), node("p", "", `${owner ? r.alias + " · " : ""}${r.price} 教室積分 · ${new Date(r.created_at * 1000).toLocaleDateString("zh-TW")}`)),
-    owner && r.status === "pending" ? button("確認已提供獎勵", () => mutation(`redemptions/${r.id}/fulfill`, {}, "已確認領取。"), "primary small") : node("span", `badge ${r.status === "pending" ? "pending" : ""}`, r.status === "fulfilled" ? "已確認領取" : "等待提供獎勵")));
+  const lifecycle = supportsRewardLifecycle(d);
+  const counts = d.redemption_counts || {
+    pending: d.redemptions.filter((r) => r.status === "pending").length,
+    fulfilled: d.redemptions.filter((r) => r.status === "fulfilled").length,
+    cancelled: d.redemptions.filter((r) => r.status === "cancelled").length
+  };
+  const total = counts.pending + counts.fulfilled + counts.cancelled;
+  const labels = { pending: "待提供", fulfilled: "已領取", cancelled: "已取消" };
+  content.append(node("div", "redemption-stats", ...Object.entries(labels).map(([status, label]) =>
+    node("div", `redemption-stat ${status}`, node("strong", "", counts[status]), node("span", "", label)))));
+  content.append(notice(lifecycle
+    ? `待提供的獎勵全部列出，已結案紀錄顯示最近 200 筆。${counts.fulfilled + counts.cancelled > 200 ? "上方數字包含較早的結案紀錄，篩選僅套用目前載入的範圍。" : ""}`
+    : "這個教室服務為舊版，顯示最近 200 筆兌換紀錄；更新服務後可使用取消退還積分與完整待提供清單。", !lifecycle));
+  if (!total) { content.append(empty("目前沒有領取紀錄", "兌換商城獎勵後，會在這裡記錄進度。")); return; }
+  const filters = node("div", "redemption-filters"); filters.setAttribute("role", "group"); filters.setAttribute("aria-label", "篩選獎勵狀態");
+  for (const [status, label] of [["all", "全部"], ...Object.entries(labels)]) {
+    const filter = button(`${label} ${status === "all" ? total : counts[status]}`, () => {
+      state.redemptionFilter = status; render();
+      document.querySelector(`[data-redemption-filter="${status}"]`)?.focus();
+    }, state.redemptionFilter === status ? "primary small" : "secondary small");
+    filter.dataset.redemptionFilter = status;
+    filter.setAttribute("aria-pressed", String(state.redemptionFilter === status)); filters.append(filter);
+  }
+  content.append(filters);
+  const filtered = d.redemptions.filter((r) => state.redemptionFilter === "all" || r.status === state.redemptionFilter);
+  if (!filtered.length) { content.append(empty("這個範圍內沒有紀錄", "可以切換其他狀態；已結案資料只包含最近 200 筆。")); return; }
+  for (const r of filtered) {
+    const statusTitle = r.status === "fulfilled" ? "已確認領取" : r.status === "cancelled" ? "已取消・積分已退還" : r.status === "pending" ? "等待提供獎勵" : "待確認狀態";
+    const info = node("div", "receipt-content", node("div", "receipt-heading", node("h3", "", r.title), node("span", `badge ${r.status}`, statusTitle)),
+      node("p", "receipt-meta", `${owner ? r.alias + " · " : ""}當時兌換 ${r.price} 教室積分`));
+    if (r.description) info.append(node("p", "receipt-description", r.description));
+    info.append(node("p", "receipt-date", `兌換於 ${receiptDate(r.created_at)}`));
+    if (r.status === "fulfilled" || r.status === "cancelled") info.append(node("p", "receipt-date", r.settled_at
+      ? `${r.status === "fulfilled" ? "確認提供" : "取消退還"}於 ${receiptDate(r.settled_at)}`
+      : "這筆舊版紀錄未記錄結案時間。"));
+    if (r.status === "cancelled") {
+      info.append(node("div", "receipt-resolution", node("strong", "", `已退還 ${r.price} 教室積分`),
+        node("p", "receipt-description", `取消原因：${r.cancel_reason || "未附原因"}`),
+        owner ? node("p", "", r.stock_restored === 1 ? "已自動回補 1 份庫存。" : "這筆沒有自動回補庫存，請依實際可提供份數調整商品。") : null));
+    }
+    const card = node("article", "redemption-card", info);
+    if (owner && r.status === "pending") card.append(node("div", "receipt-actions",
+      button("確認已提供獎勵", () => fulfillDialog(r), "primary small"),
+      lifecycle ? button("取消並退還積分", () => cancelRedemptionDialog(r), "secondary small") : null));
+    content.append(card);
+  }
 }
 function renderRanking(content, d, owner) {
   content.append(node("h2", "section-heading", "自己的進步，也能互相鼓勵"));

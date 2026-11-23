@@ -78,12 +78,15 @@ class Service:
               created_at REAL NOT NULL, request_id TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', UNIQUE(user_id,request_id));
             CREATE INDEX IF NOT EXISTS ledger_wallet ON ledger(group_id,user_id);
             CREATE INDEX IF NOT EXISTS tasks_group ON tasks(group_id);
+            CREATE INDEX IF NOT EXISTS redemptions_group_status ON redemptions(group_id,status,created_at);
             CREATE TABLE IF NOT EXISTS submission_events (
               id TEXT PRIMARY KEY, submission_id TEXT NOT NULL REFERENCES submissions(id),
               revision INTEGER NOT NULL, kind TEXT NOT NULL, note TEXT NOT NULL, created_at REAL NOT NULL);
             CREATE INDEX IF NOT EXISTS submission_events_parent ON submission_events(submission_id);
             """)
             for table,column,definition in [("products","description","TEXT NOT NULL DEFAULT ''"),("products","stock","INTEGER"),("redemptions","description","TEXT NOT NULL DEFAULT ''"),
+                                            ("redemptions","settled_at","REAL"),("redemptions","cancel_reason","TEXT NOT NULL DEFAULT ''"),
+                                            ("redemptions","stock_debited","INTEGER"),("redemptions","stock_restored","INTEGER"),
                                             ("submissions","note","TEXT NOT NULL DEFAULT ''"),("submissions","feedback","TEXT NOT NULL DEFAULT ''"),
                                             ("submissions","revision","INTEGER NOT NULL DEFAULT 1")]:
                 columns={row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
@@ -214,14 +217,22 @@ class Service:
             submissions = db.execute("SELECT s.id,s.task_id,s.status,s.updated_at,s.note,s.feedback,s.revision,t.title,t.points,u.alias FROM submissions s JOIN tasks t ON t.id=s.task_id JOIN users u ON u.id=s.user_id WHERE t.group_id=?" + ("" if owner else " AND s.user_id=?") + " ORDER BY s.updated_at DESC", (group_id,) if owner else (group_id,user["id"])).fetchall()
             products = db.execute("SELECT id,title,price,description,stock,active FROM products WHERE group_id=?" + ("" if owner else " AND active=1") + " ORDER BY active DESC,price,title", (group_id,)).fetchall()
             ledger = db.execute("SELECT id,amount,label,created_at FROM ledger WHERE group_id=? AND user_id=? ORDER BY created_at DESC LIMIT 200", (group_id,user["id"])).fetchall()
-            redemptions = db.execute("SELECT r.id,r.title,r.price,r.description,r.status,r.created_at,u.alias FROM redemptions r JOIN users u ON u.id=r.user_id WHERE r.group_id=?" + ("" if owner else " AND r.user_id=?") + " ORDER BY r.created_at DESC LIMIT 200", (group_id,) if owner else (group_id,user["id"])).fetchall()
+            receipt_scope = "r.group_id=?" + ("" if owner else " AND r.user_id=?")
+            receipt_args = (group_id,) if owner else (group_id,user["id"])
+            receipt_select = "SELECT r.id,r.title,r.price,r.description,r.status,r.created_at,r.settled_at,r.cancel_reason,r.stock_restored,u.alias FROM redemptions r JOIN users u ON u.id=r.user_id WHERE " + receipt_scope
+            # 未提供的獎勵不能被大量較新的已結束紀錄擠出待辦清單。
+            redemptions = db.execute(receipt_select + " AND r.status='pending' ORDER BY r.created_at DESC,r.rowid DESC",receipt_args).fetchall()
+            redemptions += db.execute(receipt_select + " AND r.status!='pending' ORDER BY COALESCE(r.settled_at,r.created_at) DESC,r.rowid DESC LIMIT 200",receipt_args).fetchall()
+            redemption_counts = {status:0 for status in ["pending","fulfilled","cancelled"]}
+            for row in db.execute("SELECT r.status,COUNT(*) AS count FROM redemptions r WHERE " + receipt_scope + " GROUP BY r.status",receipt_args):
+                if row["status"] in redemption_counts: redemption_counts[row["status"]] = row["count"]
             ranking = []
             if group["leaderboard"]:
-                ranking = [dict(row) for row in db.execute("SELECT u.alias,COALESCE(SUM(CASE WHEN l.amount>0 THEN l.amount ELSE 0 END),0) AS points FROM members m JOIN users u ON u.id=m.user_id LEFT JOIN ledger l ON l.group_id=m.group_id AND l.user_id=m.user_id WHERE m.group_id=? AND m.ranking=1 GROUP BY u.id ORDER BY points DESC,u.alias LIMIT 100", (group_id,)).fetchall()]
-            return {"capabilities":["submission_feedback_v1"],"group": public_group, "members": [dict(r) for r in members], "tasks": [dict(r) for r in tasks],
+                ranking = [dict(row) for row in db.execute("SELECT u.alias,COALESCE(SUM(CASE WHEN l.amount>0 AND l.source NOT GLOB 'redemption_refund:*' THEN l.amount ELSE 0 END),0) AS points FROM members m JOIN users u ON u.id=m.user_id LEFT JOIN ledger l ON l.group_id=m.group_id AND l.user_id=m.user_id WHERE m.group_id=? AND m.ranking=1 GROUP BY u.id ORDER BY points DESC,u.alias LIMIT 100", (group_id,)).fetchall()]
+            return {"capabilities":["submission_feedback_v1","reward_lifecycle_v1"],"group": public_group, "members": [dict(r) for r in members], "tasks": [dict(r) for r in tasks],
                     "submissions": [dict(r) for r in submissions], "products": [dict(r) for r in products],
                     "wallet": self.balance(db,group_id,user["id"]), "ledger": [dict(r) for r in ledger],
-                    "redemptions": [dict(r) for r in redemptions], "ranking": ranking}
+                    "redemptions": [dict(r) for r in redemptions], "redemption_counts":redemption_counts, "ranking": ranking}
 
     def create_task(self, user, group_id, data):
         title, points = text(data.get("title")), number(data.get("points"))
@@ -316,6 +327,11 @@ class Service:
             product=db.execute("SELECT * FROM products WHERE id=?",(product_id,)).fetchone()
             if not product: raise APIError(404,"找不到商品。")
             self.access(db,user,product["group_id"],True)
+            if "expected_stock" in data:
+                expected_stock=data["expected_stock"]
+                if expected_stock is not None and (type(expected_stock) is not int or not 0<=expected_stock<=1_000_000):
+                    raise APIError(400,"庫存確認格式不正確，請重新整理商品。")
+                if expected_stock != product["stock"]: raise APIError(409,"庫存已變更，請先關閉編輯、重新整理教室，再開啟商品確認剩餘份數後儲存。")
             db.execute("UPDATE products SET title=?,price=?,description=?,stock=?,active=? WHERE id=?",(title,price,description,stock,int(active),product_id))
         return {"ok":True}
 
@@ -330,12 +346,15 @@ class Service:
             if existing:
                 if existing["product_id"] != product_id: raise APIError(409,"請重新發起這次兌換。")
                 return {"id":existing["id"]}
+            if "expected_price" in data:
+                expected_price=number(data["expected_price"],10000)
+                if expected_price != product["price"]: raise APIError(409,"獎勵價格已更新，請重新整理並確認新的積分價格。")
             if not product["active"]: raise APIError(404,"這項獎勵已下架。")
             if product["stock"] is not None and product["stock"]<=0: raise APIError(409,"這項獎勵已兌換完畢，請等老師補充庫存。")
             if self.balance(db,product["group_id"],user["id"]) < product["price"]: raise APIError(409,"群組積分不足。")
             redemption_id=identifier()
-            db.execute("INSERT INTO redemptions(id,group_id,user_id,product_id,title,price,description,created_at,request_id) VALUES (?,?,?,?,?,?,?,?,?)",
-                       (redemption_id,product["group_id"],user["id"],product_id,product["title"],product["price"],product["description"],time.time(),request_id))
+            db.execute("INSERT INTO redemptions(id,group_id,user_id,product_id,title,price,description,created_at,request_id,stock_debited) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                       (redemption_id,product["group_id"],user["id"],product_id,product["title"],product["price"],product["description"],time.time(),request_id,int(product["stock"] is not None)))
             db.execute("INSERT INTO ledger VALUES (?,?,?,?,?,?,?)", (identifier(),product["group_id"],user["id"],-product["price"],"兌換群組獎勵","redemption:"+redemption_id,time.time()))
             if product["stock"] is not None: db.execute("UPDATE products SET stock=stock-1 WHERE id=?",(product_id,))
         return {"id":redemption_id}
@@ -345,7 +364,31 @@ class Service:
             row=db.execute("SELECT * FROM redemptions WHERE id=?", (redemption_id,)).fetchone()
             if not row: raise APIError(404,"找不到兌換紀錄。")
             self.access(db,user,row["group_id"],True)
-            db.execute("UPDATE redemptions SET status='fulfilled' WHERE id=?", (redemption_id,))
+            if row["status"] == "fulfilled": return {"ok":True}
+            if row["status"] != "pending": raise APIError(409,"這筆兌換已取消，無法再確認提供獎勵。")
+            db.execute("UPDATE redemptions SET status='fulfilled',settled_at=? WHERE id=?", (time.time(),redemption_id))
+        return {"ok":True}
+
+    def cancel_redemption(self,user,redemption_id,data):
+        reason=data.get("reason")
+        if (not isinstance(reason,str) or not reason.strip() or len(reason.strip())>500
+                or any((ord(c)<32 and c not in '\n\t') or 127<=ord(c)<160 for c in reason)):
+            raise APIError(400,"請填寫 1 到 500 個字元的取消原因。")
+        reason=reason.strip()
+        with self.connection(True) as db:
+            row=db.execute("SELECT * FROM redemptions WHERE id=?",(redemption_id,)).fetchone()
+            if not row: raise APIError(404,"找不到兌換紀錄。")
+            self.access(db,user,row["group_id"],True)
+            if row["status"] == "cancelled": return {"ok":True}
+            if row["status"] != "pending": raise APIError(409,"這筆獎勵已確認提供，無法取消或退還積分。")
+            # 舊紀錄不推定扣過有限庫存；改為不限量或已達上限時也不自動加庫存。
+            product=db.execute("SELECT stock FROM products WHERE id=?",(row["product_id"],)).fetchone()
+            restore=int(row["stock_debited"] == 1 and product is not None
+                        and product["stock"] is not None and product["stock"]<1_000_000)
+            settled_at=time.time()
+            db.execute("INSERT INTO ledger VALUES (?,?,?,?,?,?,?)",(identifier(),row["group_id"],row["user_id"],row["price"],"取消兌換退還積分","redemption_refund:"+redemption_id,settled_at))
+            if restore: db.execute("UPDATE products SET stock=stock+1 WHERE id=?",(row["product_id"],))
+            db.execute("UPDATE redemptions SET status='cancelled',settled_at=?,cancel_reason=?,stock_restored=? WHERE id=?",(settled_at,reason,restore,redemption_id))
         return {"ok":True}
 
     def preferences(self,user,group_id,data):
