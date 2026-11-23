@@ -288,32 +288,92 @@ function renderGroup(content) {
   content.append(tabs);
   ({ tasks: renderTasks, reviews: renderReviews, shop: renderShop, redemptions: renderRedemptions, ranking: renderRanking, ledger: renderLedger }[state.tab] || renderTasks)(content, d, owner);
 }
+async function feedbackMutation(path, payload) {
+  await api(path, payload);
+  try { await refresh(); return true; }
+  catch {
+    state.detail = null; render();
+    toast("操作已送達服務，但畫面尚未更新。請重新整理查看結果，再進行下一次操作。", true);
+    return false;
+  }
+}
+function supportsFeedback(detail) { return detail.capabilities?.includes("submission_feedback_v1") === true; }
+function submissionDialog(task) {
+  const description = task.feedback ? `前次回饋：${task.feedback}` : "可以說明完成的內容或需要協助的地方；不需要填寫私人聯絡資料。";
+  formDialog(task.status === "rejected" ? "調整後重新提交" : "提交任務", `${task.title}。${description}`,
+    [field("完成說明（選填）", "note", { multiline: true, required: false, maxLength: 1000, value: task.note || "", help: "最多 1000 個字元，只有本人與群組老師／家長能查看。" })],
+    "送出完成說明", async (data) => {
+      if (await feedbackMutation(`tasks/${task.id}/submit`, { note: data.get("note"), revision: task.revision ?? 0 })) toast("已提交，等待老師或家長確認。");
+    });
+}
+function reviewDialog(submission, approved) {
+  formDialog(approved ? "確認通過與回饋" : "給學生一個具體的下一步",
+    `${submission.alias} · ${submission.title} · 第 ${submission.revision || 1} 次提交。學生說明：${submission.note || "未附文字說明。"}`,
+    [field(approved ? "鼓勵與回饋（選填）" : "調整建議", "feedback", { multiline: true, required: !approved, maxLength: 1000,
+      help: approved ? "確認後會核發任務積分。" : "請描述可以怎麼調整；這次不會核發積分。" })],
+    approved ? "通過並核發積分" : "送出調整建議", async (data) => {
+      const payload = { approved, feedback: data.get("feedback") };
+      if (submission.revision != null) payload.revision = submission.revision;
+      if (await feedbackMutation(`submissions/${submission.id}/review`, payload)) toast(approved ? "已通過並留下回饋。" : "已送出調整建議，學生可修改後重新提交。");
+    });
+}
+function historyDialog(id, title) {
+  return run(async () => {
+    const history = await api(`submissions/${id}/history`);
+    const content = node("div", "feedback-history", node("p", "", title));
+    if (!history.events.length) content.append(notice("這筆舊版提交尚無文字歷程；之後的提交與回饋會記錄在這裡。"));
+    const names = { submitted: "學生提交", approved: "通過確認", rejected: "調整建議" };
+    for (const event of history.events) {
+      const at = new Date(event.created_at * 1000).toLocaleString("zh-TW", { dateStyle: "medium", timeStyle: "short" });
+      content.append(node("article", "feedback-event", node("h3", "", `第 ${event.revision} 次 · ${names[event.kind] || "紀錄"}`),
+        node("p", "muted", at), node("p", "feedback-note", event.note || "沒有附加文字。")));
+    }
+    content.append(node("p", "muted", `依時間由舊到新顯示最近 ${history.events.length}／${history.total} 筆。只有本人與這個群組的老師／家長可以查看。`),
+      button("完成", closeDialog));
+    openDialog("提交與回饋歷程", content);
+  });
+}
 function renderTasks(content, d, owner) {
   content.append(node("div", "section-heading", node("h2", "", "一件一件，慢慢完成"), owner ? button("發布任務", () => itemDialog(false), "primary small") : null));
-  if (!d.tasks.length) { content.append(empty("這裡還沒有任務", owner ? "先安排一件能完成的小事，讓學生開始累積成就。" : "老師或家長發布任務後，會出現在這裡。")); return; }
+  if (!supportsFeedback(d)) content.append(notice("這個教室服務為舊版，目前只支援狀態確認；更新服務後才能附上完成說明與文字回饋。"));
+  if (!d.tasks.length) content.append(empty("這裡還沒有任務", owner ? "先安排一件能完成的小事，讓學生開始累積成就。" : "老師或家長發布任務後，會出現在這裡。"));
   for (const task of d.tasks) {
     const info = node("div", "", node("h3", "", task.title), node("p", "", `通過確認後 ＋${task.points} 教室積分`));
     if (task.due_at) info.append(node("p", "", `截止 ${new Date(task.due_at * 1000).toLocaleString("zh-TW", { dateStyle: "medium", timeStyle: "short" })}`));
     const actions = node("div", "actions");
     if (owner) actions.append(button("下架", () => archive("tasks", task.id), "secondary small"));
-    else if (["open", "rejected"].includes(task.status)) actions.append(button(task.status === "rejected" ? "調整後重新提交" : "我已完成，提交確認", () => mutation(`tasks/${task.id}/submit`, {}, "已提交，等待老師或家長確認。"), "primary small"));
+    else if (["open", "rejected"].includes(task.status)) actions.append(button(task.status === "rejected" ? "調整後重新提交" : "我已完成，提交確認", () => supportsFeedback(d) ? submissionDialog(task) : mutation(`tasks/${task.id}/submit`, {}, "已提交狀態，等待老師或家長確認。"), "primary small"));
     else actions.append(node("span", `badge ${task.status}`, task.status === "approved" ? "已通過" : "等待確認"));
+    if (!owner && task.feedback) info.append(node("p", "feedback-note", `${task.status === "pending" ? "前次回饋" : "老師／家長回饋"}：${task.feedback}`));
+    if (!owner && task.submission_id) actions.append(button("提交與回饋歷程", () => historyDialog(task.submission_id, task.title), "secondary small"));
     content.append(node("article", "list-card", info, actions));
+  }
+  if (!owner) {
+    const archived = d.submissions.filter((s) => s.task_id && !d.tasks.some((t) => t.id === s.task_id));
+    if (archived.length) content.append(node("h2", "spacer-top", "已下架任務的提交紀錄"));
+    for (const submission of archived) content.append(node("article", "list-card", node("div", "", node("h3", "", submission.title),
+      node("p", "feedback-note", submission.feedback || "任務已下架，既有提交與積分紀錄保留。")),
+      button("提交與回饋歷程", () => historyDialog(submission.id, submission.title), "secondary small")));
   }
 }
 function renderReviews(content, d) {
   content.append(node("div", "section-heading", node("h2", "", "看見學生的努力")));
+  if (!supportsFeedback(d)) content.append(notice("舊版教室只支援狀態審核；更新服務後可填寫文字回饋與查看歷程。"));
   const pending = d.submissions.filter((s) => s.status === "pending");
   if (!pending.length) content.append(empty("目前沒有待確認的提交", "學生完成並提交後，就能在這裡給予回饋。"));
   for (const submission of pending) {
-    content.append(node("article", "list-card", node("div", "", node("h3", "", submission.title), node("p", "", `${submission.alias} · 獎勵 ${submission.points} 教室積分`)),
-      node("div", "actions", button(`通過並核發 ＋${submission.points}`, () => mutation(`submissions/${submission.id}/review`, { approved: true }, "已確認並核發積分。"), "primary small"),
-        button("請再調整", () => mutation(`submissions/${submission.id}/review`, { approved: false }, "已通知學生可以調整後重新提交。"), "secondary small"))));
+    content.append(node("article", "list-card", node("div", "", node("h3", "", submission.title), node("p", "", `${submission.alias} · 第 ${submission.revision || 1} 次提交 · 獎勵 ${submission.points} 教室積分`),
+      node("p", "feedback-note", submission.note || "學生未附文字說明。")),
+      node("div", "actions", button(`通過並核發 ＋${submission.points}`, () => supportsFeedback(d) ? reviewDialog(submission, true) : mutation(`submissions/${submission.id}/review`, { approved: true }, "已通過確認。"), "primary small"),
+        button("請再調整", () => supportsFeedback(d) ? reviewDialog(submission, false) : mutation(`submissions/${submission.id}/review`, { approved: false }, "已更新為請再調整。"), "secondary small"),
+        supportsFeedback(d) ? button("提交與回饋歷程", () => historyDialog(submission.id, submission.title), "secondary small") : null)));
   }
   const reviewed = d.submissions.filter((s) => s.status !== "pending");
   if (reviewed.length) {
     content.append(node("h2", "spacer-top", "已確認紀錄"));
-    for (const s of reviewed) content.append(node("article", "list-card", node("div", "", node("h3", "", s.title), node("p", "", s.alias)), node("span", `badge ${s.status}`, s.status === "approved" ? "已通過" : "請再調整")));
+    for (const s of reviewed) content.append(node("article", "list-card", node("div", "", node("h3", "", s.title), node("p", "", s.alias), node("p", "feedback-note", s.feedback || "未附文字回饋。")),
+      node("div", "actions", node("span", `badge ${s.status}`, s.status === "approved" ? "已通過" : "請再調整"),
+        supportsFeedback(d) ? button("提交與回饋歷程", () => historyDialog(s.id, s.title), "secondary small") : null)));
   }
 }
 function renderShop(content, d, owner) {

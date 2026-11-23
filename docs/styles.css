@@ -37,3 +37,5 @@ dialog{border-color:#d1dac7;border-radius:20px;width:min(94vw,530px);padding:30p
 @media(max-width:760px){.hero-art{aspect-ratio:1/1.12}.art-caption{padding:12px 18px}.city-sticker{bottom:65px}}
 
 .header-link[hidden]+#account-nav{margin-left:auto}.hero-description,.step-copy>p:last-child,.dialog-description{font-size:1rem}
+
+.feedback-note{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.65}.feedback-event{border-left:3px solid var(--green,#456b50);padding:1rem 1.25rem;margin:1rem 0;background:var(--paper,#f8f8f0);border-radius:0 14px 14px 0}.feedback-event h3{margin:0 0 .5rem}.feedback-history{max-height:65vh;overflow:auto;padding-right:.25rem}

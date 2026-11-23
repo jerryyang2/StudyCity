@@ -32,6 +32,12 @@ def number(value, maximum=1000):
     return value
 
 
+def note_text(value, limit=1000):
+    if not isinstance(value,str) or len(value.strip())>limit or any(ord(c)<32 and c not in '\n\t' for c in value):
+        raise APIError(400,"說明與回饋請填寫 1000 個字元以內的文字。")
+    return value.strip()
+
+
 class Service:
     def __init__(self, database):
         self.database = Path(database)
@@ -72,8 +78,14 @@ class Service:
               created_at REAL NOT NULL, request_id TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', UNIQUE(user_id,request_id));
             CREATE INDEX IF NOT EXISTS ledger_wallet ON ledger(group_id,user_id);
             CREATE INDEX IF NOT EXISTS tasks_group ON tasks(group_id);
+            CREATE TABLE IF NOT EXISTS submission_events (
+              id TEXT PRIMARY KEY, submission_id TEXT NOT NULL REFERENCES submissions(id),
+              revision INTEGER NOT NULL, kind TEXT NOT NULL, note TEXT NOT NULL, created_at REAL NOT NULL);
+            CREATE INDEX IF NOT EXISTS submission_events_parent ON submission_events(submission_id);
             """)
-            for table,column,definition in [("products","description","TEXT NOT NULL DEFAULT ''"),("products","stock","INTEGER"),("redemptions","description","TEXT NOT NULL DEFAULT ''")]:
+            for table,column,definition in [("products","description","TEXT NOT NULL DEFAULT ''"),("products","stock","INTEGER"),("redemptions","description","TEXT NOT NULL DEFAULT ''"),
+                                            ("submissions","note","TEXT NOT NULL DEFAULT ''"),("submissions","feedback","TEXT NOT NULL DEFAULT ''"),
+                                            ("submissions","revision","INTEGER NOT NULL DEFAULT 1")]:
                 columns={row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
                 if column not in columns: db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         self.database.chmod(0o600)
@@ -198,15 +210,15 @@ class Service:
             public_group["invite"] = group["invite"] if owner else None
             members = db.execute("SELECT u.id,u.alias,m.ranking FROM members m JOIN users u ON u.id=m.user_id WHERE m.group_id=?" + ("" if owner else " AND m.user_id=?"),
                                  (group_id,) if owner else (group_id,user["id"])).fetchall()
-            tasks = db.execute("SELECT t.id,t.title,t.points,t.due_at,COALESCE(s.status,'open') AS status FROM tasks t LEFT JOIN submissions s ON s.task_id=t.id AND s.user_id=? WHERE t.group_id=? AND t.active=1 ORDER BY t.rowid DESC", (user["id"],group_id)).fetchall()
-            submissions = db.execute("SELECT s.id,s.status,s.updated_at,t.title,t.points,u.alias FROM submissions s JOIN tasks t ON t.id=s.task_id JOIN users u ON u.id=s.user_id WHERE t.group_id=?" + ("" if owner else " AND s.user_id=?") + " ORDER BY s.updated_at DESC", (group_id,) if owner else (group_id,user["id"])).fetchall()
+            tasks = db.execute("SELECT t.id,t.title,t.points,t.due_at,COALESCE(s.status,'open') AS status,s.id AS submission_id,s.note,s.feedback,s.revision FROM tasks t LEFT JOIN submissions s ON s.task_id=t.id AND s.user_id=? WHERE t.group_id=? AND t.active=1 ORDER BY t.rowid DESC", (user["id"],group_id)).fetchall()
+            submissions = db.execute("SELECT s.id,s.task_id,s.status,s.updated_at,s.note,s.feedback,s.revision,t.title,t.points,u.alias FROM submissions s JOIN tasks t ON t.id=s.task_id JOIN users u ON u.id=s.user_id WHERE t.group_id=?" + ("" if owner else " AND s.user_id=?") + " ORDER BY s.updated_at DESC", (group_id,) if owner else (group_id,user["id"])).fetchall()
             products = db.execute("SELECT id,title,price,description,stock,active FROM products WHERE group_id=?" + ("" if owner else " AND active=1") + " ORDER BY active DESC,price,title", (group_id,)).fetchall()
             ledger = db.execute("SELECT id,amount,label,created_at FROM ledger WHERE group_id=? AND user_id=? ORDER BY created_at DESC LIMIT 200", (group_id,user["id"])).fetchall()
             redemptions = db.execute("SELECT r.id,r.title,r.price,r.description,r.status,r.created_at,u.alias FROM redemptions r JOIN users u ON u.id=r.user_id WHERE r.group_id=?" + ("" if owner else " AND r.user_id=?") + " ORDER BY r.created_at DESC LIMIT 200", (group_id,) if owner else (group_id,user["id"])).fetchall()
             ranking = []
             if group["leaderboard"]:
                 ranking = [dict(row) for row in db.execute("SELECT u.alias,COALESCE(SUM(CASE WHEN l.amount>0 THEN l.amount ELSE 0 END),0) AS points FROM members m JOIN users u ON u.id=m.user_id LEFT JOIN ledger l ON l.group_id=m.group_id AND l.user_id=m.user_id WHERE m.group_id=? AND m.ranking=1 GROUP BY u.id ORDER BY points DESC,u.alias LIMIT 100", (group_id,)).fetchall()]
-            return {"group": public_group, "members": [dict(r) for r in members], "tasks": [dict(r) for r in tasks],
+            return {"capabilities":["submission_feedback_v1"],"group": public_group, "members": [dict(r) for r in members], "tasks": [dict(r) for r in tasks],
                     "submissions": [dict(r) for r in submissions], "products": [dict(r) for r in products],
                     "wallet": self.balance(db,group_id,user["id"]), "ledger": [dict(r) for r in ledger],
                     "redemptions": [dict(r) for r in redemptions], "ranking": ranking}
@@ -220,32 +232,65 @@ class Service:
             task_id=identifier(); db.execute("INSERT INTO tasks(id,group_id,title,points,due_at) VALUES (?,?,?,?,?)", (task_id,group_id,title,points,due))
             return {"id": task_id}
 
-    def submit(self, user, task_id):
+    def submit(self, user, task_id, data=None):
         if user["role"] != "student": raise APIError(403,"只有學生可以提交任務。")
+        data={} if data is None else data
+        note=note_text(data.get("note","")); expected=data.get("revision")
+        if expected is not None and (type(expected) is not int or expected<0): raise APIError(400,"提交版本格式不正確。")
         with self.connection(True) as db:
             task=db.execute("SELECT * FROM tasks WHERE id=? AND active=1", (task_id,)).fetchone()
             if not task: raise APIError(404,"找不到可提交的任務。")
             self.access(db,user,task["group_id"])
             existing=db.execute("SELECT * FROM submissions WHERE task_id=? AND user_id=?", (task_id,user["id"])).fetchone()
             if existing:
-                if existing["status"] == "rejected": db.execute("UPDATE submissions SET status='pending',updated_at=? WHERE id=?", (time.time(),existing["id"]))
+                if expected is None and (existing["note"] or existing["revision"]>1):
+                    raise APIError(409,"這份提交含新版說明或已調整過，請更新 App／網頁並重新整理後再提交。")
+                if existing["status"] != "rejected":
+                    if existing["note"]!=note and expected is not None: raise APIError(409,"這份提交已送出，請重新整理確認目前狀態。")
+                    return {"id":existing["id"]}
+                if expected is not None and expected!=existing["revision"]: raise APIError(409,"提交內容已有更新，請重新整理後再調整。")
+                revision=existing["revision"]+1; now=time.time()
+                db.execute("UPDATE submissions SET status='pending',note=?,revision=?,updated_at=? WHERE id=?",(note,revision,now,existing["id"]))
+                db.execute("INSERT INTO submission_events VALUES (?,?,?,?,?,?)",(identifier(),existing["id"],revision,"submitted",note,now))
                 return {"id":existing["id"]}
+            if expected not in [None,0]: raise APIError(409,"找不到這個版本的提交，請重新整理。")
             submission_id=identifier()
-            db.execute("INSERT INTO submissions VALUES (?,?,?,?,?)", (submission_id,task_id,user["id"],"pending",time.time()))
+            now=time.time()
+            db.execute("INSERT INTO submissions(id,task_id,user_id,status,updated_at,note) VALUES (?,?,?,?,?,?)", (submission_id,task_id,user["id"],"pending",now,note))
+            db.execute("INSERT INTO submission_events VALUES (?,?,?,?,?,?)",(identifier(),submission_id,1,"submitted",note,now))
             return {"id":submission_id}
 
-    def review(self, user, submission_id, approved):
+    def review(self, user, submission_id, approved, feedback=None, revision=None):
         if type(approved) is not bool: raise APIError(400,"請選擇審核結果。")
+        message=note_text("" if feedback is None else feedback)
+        if feedback is not None and not approved and not message: raise APIError(400,"請留下具體的調整建議。")
+        if revision is not None and (type(revision) is not int or revision<1): raise APIError(400,"審核版本格式不正確。")
         with self.connection(True) as db:
             row=db.execute("SELECT s.*,t.group_id,t.points FROM submissions s JOIN tasks t ON s.task_id=t.id WHERE s.id=?", (submission_id,)).fetchone()
             if not row: raise APIError(404,"找不到提交紀錄。")
             self.access(db,user,row["group_id"],True)
+            if revision is None and (row["note"] or row["revision"]>1):
+                raise APIError(409,"這份提交含新版說明或已調整過，請更新 App／網頁並查看內容後再確認。")
+            if revision is not None and revision!=row["revision"]: raise APIError(409,"學生已更新提交，請重新整理並查看新內容後再確認。")
             if row["status"] == "approved": return {"ok":True}
+            if row["status"] == "rejected" and not approved and row["feedback"]==message: return {"ok":True}
             if row["status"] != "pending": raise APIError(409,"請等待學生重新提交。")
-            db.execute("UPDATE submissions SET status=?,updated_at=? WHERE id=?", ("approved" if approved else "rejected",time.time(),submission_id))
+            kind="approved" if approved else "rejected"; now=time.time()
+            db.execute("UPDATE submissions SET status=?,feedback=?,updated_at=? WHERE id=?", (kind,message,now,submission_id))
+            db.execute("INSERT INTO submission_events VALUES (?,?,?,?,?,?)",(identifier(),submission_id,row["revision"],kind,message,now))
             if approved:
                 db.execute("INSERT INTO ledger VALUES (?,?,?,?,?,?,?)", (identifier(),row["group_id"],row["user_id"],row["points"],"任務審核通過","submission:"+submission_id,time.time()))
         return {"ok":True}
+
+    def history(self,user,submission_id):
+        with self.connection() as db:
+            row=db.execute("SELECT s.user_id,t.group_id,g.owner_id FROM submissions s JOIN tasks t ON t.id=s.task_id JOIN groups g ON g.id=t.group_id WHERE s.id=?",(submission_id,)).fetchone()
+            if not row: raise APIError(404,"找不到提交紀錄。")
+            self.access(db,user,row["group_id"])
+            if user["id"] not in [row["user_id"],row["owner_id"]]: raise APIError(403,"無法查看其他人的提交與回饋。")
+            total=db.execute("SELECT COUNT(*) FROM submission_events WHERE submission_id=?",(submission_id,)).fetchone()[0]
+            events=db.execute("SELECT id,revision,kind,note,created_at FROM submission_events WHERE submission_id=? ORDER BY rowid DESC LIMIT 50",(submission_id,)).fetchall()
+            return {"submission_id":submission_id,"total":total,"events":[dict(e) for e in reversed(events)]}
 
     def create_product(self,user,group_id,data):
         title,price,description,stock,active=self.product_values(data)
@@ -345,9 +390,11 @@ class Service:
                 gid=group["id"]
                 db.execute("DELETE FROM ledger WHERE group_id=?", (gid,))
                 db.execute("DELETE FROM redemptions WHERE group_id=?", (gid,))
+                db.execute("DELETE FROM submission_events WHERE submission_id IN (SELECT s.id FROM submissions s JOIN tasks t ON t.id=s.task_id WHERE t.group_id=?)",(gid,))
                 db.execute("DELETE FROM submissions WHERE task_id IN (SELECT id FROM tasks WHERE group_id=?)", (gid,))
                 for table in ["tasks","products","members"]: db.execute(f"DELETE FROM {table} WHERE group_id=?", (gid,))
                 db.execute("DELETE FROM groups WHERE id=?", (gid,))
+            db.execute("DELETE FROM submission_events WHERE submission_id IN (SELECT id FROM submissions WHERE user_id=?)",(user["id"],))
             for table in ["ledger","redemptions","submissions","members","sessions"]:
                 db.execute(f"DELETE FROM {table} WHERE user_id=?", (user["id"],))
             db.execute("DELETE FROM users WHERE id=?", (user["id"],))

@@ -78,7 +78,7 @@ class Handler(BaseHTTPRequestHandler):
             host=urlsplit("//"+self.headers.get("Host","")).hostname
             if host not in self.server.allowed_hosts: raise APIError(400,"這個主機名稱尚未設定。")
             if len(path)>300: raise APIError(414,"請求路徑過長。")
-            if self.command=="GET" and path=="/health": return self.reply(200,{"ok":True,"version":1,"service":"StudyCity"})
+            if self.command=="GET" and path=="/health": return self.reply(200,{"ok":True,"version":1,"service":"StudyCity","capabilities":["submission_feedback_v1"]})
             if self.command=="GET" and self.static(path): return
             web_mode=self.headers.get("X-StudyCity-Web","")
             if self.headers.get("Origin") and not self.origin_allowed(): raise APIError(403,"這個網站尚未獲服務允許。")
@@ -120,6 +120,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.command=="GET":
                 if path=="/me": return self.reply(200,service.overview(user))
                 if match:=re.fullmatch(r"/groups/([\w-]+)",path): return self.reply(200,service.detail(user,match[1]))
+                if match:=re.fullmatch(r"/submissions/([\w-]+)/history",path): return self.reply(200,service.history(user,match[1]))
             if self.command=="POST":
                 if path=="/auth/logout": return self.reply(200,service.logout(token),[("Set-Cookie",self.cookie("",clear=True))])
                 if path=="/auth/delete": return self.reply(200,service.delete_account(user,data),[("Set-Cookie",self.cookie("",clear=True))])
@@ -128,8 +129,8 @@ class Handler(BaseHTTPRequestHandler):
                 if match:=re.fullmatch(r"/groups/([\w-]+)/(tasks|products|preferences|leave)",path):
                     action={"tasks":service.create_task,"products":service.create_product,"preferences":service.preferences}
                     return self.reply(200,service.leave(user,match[1]) if match[2]=="leave" else action[match[2]](user,match[1],data))
-                if match:=re.fullmatch(r"/tasks/([\w-]+)/submit",path): return self.reply(200,service.submit(user,match[1]))
-                if match:=re.fullmatch(r"/submissions/([\w-]+)/review",path): return self.reply(200,service.review(user,match[1],data.get("approved")))
+                if match:=re.fullmatch(r"/tasks/([\w-]+)/submit",path): return self.reply(200,service.submit(user,match[1],data))
+                if match:=re.fullmatch(r"/submissions/([\w-]+)/review",path): return self.reply(200,service.review(user,match[1],data.get("approved"),data.get("feedback"),data.get("revision")))
                 if match:=re.fullmatch(r"/products/([\w-]+)/redeem",path): return self.reply(200,service.redeem(user,match[1],data))
                 if match:=re.fullmatch(r"/products/([\w-]+)/update",path): return self.reply(200,service.update_product(user,match[1],data))
                 if match:=re.fullmatch(r"/redemptions/([\w-]+)/fulfill",path): return self.reply(200,service.fulfill(user,match[1]))
