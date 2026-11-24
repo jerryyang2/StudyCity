@@ -2,10 +2,20 @@
 
 // 認證權杖只留在此分頁記憶體；同源服務使用 HttpOnly Cookie。
 const $ = (id) => document.getElementById(id);
-const state = { user: null, groups: [], detail: null, groupId: null, tab: "tasks", token: null, busy: false, api: null, ready: false, redemptionFilter: "all" };
+const state = { user: null, groups: [], detail: null, groupId: null, tab: "tasks", token: null, busy: false, api: null, ready: false, redemptionFilter: "all",
+  taskStatus: "all", taskQuery: "", taskOrder: "priority", reviewStatus: "pending", reviewQuery: "", reviewOrder: "oldest", reviewTaskId: null };
 const roleNames = { teacher: "老師", parent: "家長", student: "學生" };
 const redemptionRequests = new Map();
 let toastTimer;
+let currentBoard = null;
+function resetBoards() {
+  state.taskStatus = "all"; state.taskQuery = ""; state.taskOrder = "priority";
+  state.reviewStatus = "pending"; state.reviewQuery = ""; state.reviewOrder = "oldest"; state.reviewTaskId = null;
+  currentBoard = null;
+}
+function enterGroup(id) {
+  resetBoards(); state.groupId = id; state.detail = null; state.tab = "tasks";
+}
 
 function node(tag, cls, ...children) {
   const element = document.createElement(tag);
@@ -64,13 +74,14 @@ async function api(path, data) {
 function clearUser() {
   state.user = null; state.groups = []; state.groupId = null; state.detail = null; state.token = null;
   state.redemptionFilter = "all";
+  resetBoards();
   redemptionRequests.clear(); render();
 }
 async function refresh() {
   const result = await api("me"); state.user = result.user; state.groups = result.groups;
   if (state.groupId) {
     if (state.groups.some((group) => group.id === state.groupId)) state.detail = await api(`groups/${state.groupId}`);
-    else { state.groupId = null; state.detail = null; }
+    else { enterGroup(null); }
   }
   render();
 }
@@ -105,7 +116,7 @@ function checkbox(label, name, checked = false) {
   const input = document.createElement("input"); input.type = "checkbox"; input.name = name; input.checked = checked;
   return node("label", "toggle-row", input, node("span", "", label));
 }
-function closeDialog() { if (!state.busy) { $("modal").close(); $("dialog-content").replaceChildren(); } }
+function closeDialog() { if (!state.busy) { $("modal").close(); $("dialog-content").replaceChildren(); updateVisibleBoardClock(); } }
 function openDialog(title, content, kind = "form") {
   $("modal").dataset.kind = kind;
   $("dialog-title").textContent = title; $("dialog-content").replaceChildren(content);
@@ -184,14 +195,14 @@ function createGroupDialog() {
   const family = state.user.role === "parent";
   formDialog(family ? "建立一個家庭群組" : "建立一個新教室", "取一個大家認得的名字。建立後會產生專屬邀請碼，讓學生加入。",
     [field(family ? "家庭群組名稱" : "教室名稱", "name", { maxLength: 50, placeholder: family ? "例如：我們家的小小計畫" : "例如：一起前進學習班" })], "建立並取得邀請碼", async (data) => {
-      const result = await api("groups", { name: data.get("name") }); state.groupId = result.id; state.tab = "tasks";
+      const result = await api("groups", { name: data.get("name") }); enterGroup(result.id);
       await refresh(); toast("建立完成，邀請碼已準備好。");
     });
 }
 function joinDialog() {
   formDialog("加入一個教室", "向老師或家長取得邀請碼。加入後，只會分享你在此教室提交的任務與積分紀錄。",
     [field("教室邀請碼", "invite", { maxLength: 100, placeholder: "貼上老師或家長提供的邀請碼", autocomplete: "off" })], "確認加入", async (data) => {
-      const result = await api("groups/join", { invite: data.get("invite") }); state.groupId = result.id; state.tab = "tasks";
+      const result = await api("groups/join", { invite: data.get("invite") }); enterGroup(result.id);
       await refresh(); toast("已加入教室。");
     });
 }
@@ -268,10 +279,11 @@ function cancelRedemptionDialog(receipt) {
 function groupButton(group) {
   const element = node("button", `side-button${state.groupId === group.id ? " active" : ""}`, group.name);
   element.type = "button";
-  element.addEventListener("click", () => run(async () => { state.groupId = group.id; state.tab = "tasks"; await refresh(); }));
+  element.addEventListener("click", () => run(async () => { enterGroup(group.id); await refresh(); }));
   return element;
 }
 function render() {
+  currentBoard = null;
   $("landing").hidden = !!state.user; $("workspace").hidden = !state.user;
   const helpLink = document.querySelector(".header-link");
   if (helpLink) helpLink.hidden = !!state.user;
@@ -284,7 +296,7 @@ function render() {
   sidebar.append(node("div", "sidebar-user", node("strong", "", state.user.alias), node("span", "muted", "今天，也照自己的步調前進。")));
   const navigation = node("nav", "");
   const overviewButton = node("button", `side-button${state.groupId === null ? " active" : ""}`, "我的教室");
-  overviewButton.type = "button"; overviewButton.addEventListener("click", () => { state.groupId = null; state.detail = null; render(); });
+  overviewButton.type = "button"; overviewButton.addEventListener("click", () => { enterGroup(null); render(); });
   navigation.append(overviewButton, node("p", "sidebar-label", "已加入的群組"), ...state.groups.map(groupButton)); sidebar.append(navigation);
   sidebar.append(node("p", "sidebar-label", "帳號"), button("帳號與資料", accountDialog, "soft small"));
   const content = $("workspace-content"); content.replaceChildren();
@@ -307,7 +319,7 @@ function renderOverview(content) {
   for (const group of state.groups) {
     cards.append(node("article", "class-card", node("span", "class-symbol", group.kind === "family" ? "⌂" : "▤"),
       node("h2", "", group.name), node("p", "muted", `${group.member_count || 0} 位學生 · ${group.task_count || 0} 項任務`),
-      button("進入教室", () => run(async () => { state.groupId = group.id; state.tab = "tasks"; await refresh(); }), "secondary small")));
+      button("進入教室", () => run(async () => { enterGroup(group.id); await refresh(); }), "secondary small")));
   }
   content.append(cards);
 }
@@ -376,48 +388,171 @@ function historyDialog(id, title) {
     openDialog("提交與回饋歷程", content);
   });
 }
+const taskStatusNames = { open: "待完成", rejected: "請調整", pending: "待確認", approved: "已通過" };
+function boardQuery(value) { return String(value || "").trim().toLocaleLowerCase("zh-TW"); }
+function stableText(a, b) { return String(a || "").localeCompare(String(b || ""), "zh-Hant"); }
+function validTime(value) { return typeof value === "number" && Number.isFinite(value) ? value : null; }
+function compareDeadline(a, b) { return (validTime(a.due_at) ?? Infinity) - (validTime(b.due_at) ?? Infinity) || 0; }
+function submissionCounts(submissions, taskId = null) {
+  const counts = { pending: 0, approved: 0, rejected: 0 };
+  for (const submission of submissions) {
+    if (taskId !== null && submission.task_id !== taskId) continue;
+    if (Object.hasOwn(counts, submission.status)) counts[submission.status] += 1;
+  }
+  return counts;
+}
+function selectBoardTasks(tasks, submissions, owner, status, query, order) {
+  const match = boardQuery(query), priorities = { rejected: 0, open: 1, pending: 2, approved: 3 };
+  const pendingTasks = owner ? new Set(submissions.filter((s) => s.status === "pending" && typeof s.task_id === "string").map((s) => s.task_id)) : null;
+  return tasks.filter((task) => (owner || status === "all" || task.status === status) && boardQuery(task.title).includes(match)).sort((a, b) => {
+    const name = stableText(a.title, b.title) || stableText(a.id, b.id);
+    if (order === "title") return name;
+    const due = compareDeadline(a, b);
+    if (order === "deadline") return due || name;
+    const priority = owner
+      ? Number(!pendingTasks.has(a.id)) - Number(!pendingTasks.has(b.id))
+      : (priorities[a.status] ?? 4) - (priorities[b.status] ?? 4);
+    return priority || due || name;
+  });
+}
+function selectBoardReviews(submissions, taskId, status, query, order) {
+  const match = boardQuery(query);
+  return submissions.filter((submission) => (taskId === null || submission.task_id === taskId) && (status === "all" || submission.status === status)
+    && (boardQuery(submission.alias).includes(match) || boardQuery(submission.title).includes(match))).sort((a, b) => {
+    const aTime = validTime(a.updated_at), bTime = validTime(b.updated_at);
+    if (aTime === null && bTime !== null) return 1;
+    if (bTime === null && aTime !== null) return -1;
+    return (aTime !== null && bTime !== null ? (order === "newest" ? bTime - aTime : aTime - bTime) : 0) || stableText(a.id, b.id);
+  });
+}
+function taskDeadline(task, owner, now = new Date()) {
+  const value = validTime(task.due_at);
+  if (value === null) return { kind: "none", label: "未設定截止" };
+  const due = new Date(value * 1000), absolute = due.toLocaleString("zh-TW", { dateStyle: "medium", timeStyle: "short" });
+  if (!owner && ["pending", "approved"].includes(task.status)) return { kind: "neutral", label: `截止 ${absolute}` };
+  if (due < now) return { kind: "overdue", label: `截止已過 · ${absolute}` };
+  const day = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime();
+  const afterTomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 2).getTime();
+  if (due.getTime() >= day && due.getTime() < tomorrow) return { kind: "today", label: `今天截止 · ${due.toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit" })}` };
+  if (due.getTime() >= tomorrow && due.getTime() < afterTomorrow) return { kind: "tomorrow", label: `明天截止 · ${due.toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit" })}` };
+  return { kind: "later", label: `截止 ${absolute}` };
+}
+function updateVisibleBoardClock(now = new Date()) {
+  if (!currentBoard || currentBoard.groupId !== state.groupId || currentBoard.tab !== state.tab || document.hidden || $("modal").open) return;
+  currentBoard.updateClock(now);
+}
+function boardSearch(label, value, onInput) {
+  const wrapper = field(label, "board-search", { type: "search", required: false, value, placeholder: label, autocomplete: "off" });
+  const input = wrapper.querySelector("input"); input.addEventListener("input", () => onInput(input.value));
+  return { wrapper, input };
+}
+function boardOrder(label, value, choices, onChange) {
+  const wrapper = field(label, "board-order", { required: false, choices, value });
+  const select = wrapper.querySelector("select"); select.addEventListener("change", () => onChange(select.value));
+  return { wrapper, select };
+}
+function boardFilters(choices, active, onSelect) {
+  const container = node("div", "board-filters"); container.setAttribute("role", "group"); container.setAttribute("aria-label", "依狀態篩選");
+  const controls = [];
+  for (const [value, label] of choices) {
+    const control = button(label, () => onSelect(value), "secondary small"); controls.push({ value, control }); container.append(control);
+  }
+  const update = (value) => controls.forEach(({ value: item, control }) => { control.className = `button ${item === value ? "primary" : "secondary"} small`; control.setAttribute("aria-pressed", String(item === value)); });
+  update(active); return { container, update };
+}
+function boardNote(title, text, kind = "") {
+  return node("div", `board-note ${kind}`, node("strong", "", title), node("p", "feedback-note", text));
+}
 function renderTasks(content, d, owner) {
   content.append(node("div", "section-heading", node("h2", "", "一件一件，慢慢完成"), owner ? button("發布任務", () => itemDialog(false), "primary small") : null));
   if (!supportsFeedback(d)) content.append(notice("這個教室服務為舊版，目前只支援狀態確認；更新服務後才能附上完成說明與文字回饋。"));
-  if (!d.tasks.length) content.append(empty("這裡還沒有任務", owner ? "先安排一件能完成的小事，讓學生開始累積成就。" : "老師或家長發布任務後，會出現在這裡。"));
-  for (const task of d.tasks) {
-    const info = node("div", "", node("h3", "", task.title), node("p", "", `通過確認後 ＋${task.points} 教室積分`));
-    if (task.due_at) info.append(node("p", "", `截止 ${new Date(task.due_at * 1000).toLocaleString("zh-TW", { dateStyle: "medium", timeStyle: "short" })}`));
-    const actions = node("div", "actions");
-    if (owner) actions.append(button("下架", () => archive("tasks", task.id), "secondary small"));
-    else if (["open", "rejected"].includes(task.status)) actions.append(button(task.status === "rejected" ? "調整後重新提交" : "我已完成，提交確認", () => supportsFeedback(d) ? submissionDialog(task) : mutation(`tasks/${task.id}/submit`, {}, "已提交狀態，等待老師或家長確認。"), "primary small"));
-    else actions.append(node("span", `badge ${task.status}`, task.status === "approved" ? "已通過" : "等待確認"));
-    if (!owner && task.feedback) info.append(node("p", "feedback-note", `${task.status === "pending" ? "前次回饋" : "老師／家長回饋"}：${task.feedback}`));
-    if (!owner && task.submission_id) actions.append(button("提交與回饋歷程", () => historyDialog(task.submission_id, task.title), "secondary small"));
-    content.append(node("article", "list-card", info, actions));
-  }
+  if (owner) content.append(notice("每項任務按提交紀錄統計，包含已退出成員的紀錄；這些數字不代表目前成員的完成率。"));
+  if (owner && d.submissions.some((s) => typeof s.task_id !== "string")) content.append(notice("部分舊提交缺少任務識別，未納入逐任務統計；仍可到確認努力區查看完整提交清單。"));
+  if (!owner) content.append(node("p", "board-history-note", "截止時間用來提醒安排，過期仍可提交，由老師／家長確認。"));
+  const result = node("div", "board-results"), summary = node("p", "board-result-count"); summary.setAttribute("role", "status"); summary.setAttribute("aria-live", "polite");
+  let deadlineBadges = [];
+  const updateClock = (now) => deadlineBadges.forEach(({ task, badge }) => { const due = taskDeadline(task, owner, now); badge.textContent = due.label; badge.className = `deadline-badge ${due.kind}`; });
+  const clear = () => { state.taskStatus = "all"; state.taskQuery = ""; state.taskOrder = "priority"; search.input.value = ""; order.select.value = "priority"; filters?.update("all"); update(); search.input.focus(); };
+  const update = () => {
+    result.replaceChildren(); deadlineBadges = [];
+    const tasks = selectBoardTasks(d.tasks, d.submissions, owner, state.taskStatus, state.taskQuery, state.taskOrder);
+    summary.textContent = `目前顯示 ${tasks.length}／${d.tasks.length} 項上架任務`;
+    if (!tasks.length) { result.append(empty(d.tasks.length ? "沒有符合條件的任務" : "這裡還沒有任務", d.tasks.length ? "試試其他名稱，或清除篩選查看全部任務。" : owner ? "先安排一件能完成的小事，讓學生開始累積成就。" : "老師或家長發布任務後，會出現在這裡。", d.tasks.length ? button("清除搜尋與篩選", clear, "secondary") : null)); return; }
+    for (const task of tasks) {
+      const badge = node("span", "deadline-badge"); deadlineBadges.push({ task, badge });
+      const info = node("div", "board-card-content", node("div", "board-card-heading", node("h3", "", task.title), !owner ? node("span", `badge ${task.status}`, taskStatusNames[task.status] || "待確認狀態") : null),
+        node("div", "board-task-meta", node("span", "board-points", `通過確認 ＋${task.points} 分`), badge));
+      const actions = node("div", "board-actions");
+      if (owner) {
+        const counts = submissionCounts(d.submissions, task.id);
+        info.append(node("div", "task-submission-counts", node("span", "pending", `待確認 ${counts.pending}`), node("span", "", `已通過 ${counts.approved}`), node("span", "", `請調整 ${counts.rejected}`)));
+        actions.append(button("查看這項任務的審核", () => { state.reviewTaskId = task.id; state.reviewStatus = "pending"; state.reviewQuery = ""; state.tab = "reviews"; render(); }, "primary small"),
+          button("下架任務", () => archive("tasks", task.id), "secondary small"));
+      } else {
+        if (task.note) info.append(boardNote(`我的完成說明 · 第 ${task.revision || 1} 次提交`, task.note));
+        if (task.feedback) info.append(boardNote(task.status === "pending" ? "前次回饋" : "老師／家長回饋", task.feedback, "feedback"));
+        if (["open", "rejected"].includes(task.status)) actions.append(button(task.status === "rejected" ? "調整後重新提交" : "我已完成，提交確認", () => supportsFeedback(d) ? submissionDialog(task) : mutation(`tasks/${task.id}/submit`, {}, "已提交狀態，等待老師或家長確認。"), "primary small"));
+        if (task.submission_id) actions.append(button("提交與回饋歷程", () => historyDialog(task.submission_id, task.title), "secondary small"));
+      }
+      result.append(node("article", "board-card", info, actions));
+    }
+    updateClock(new Date());
+  };
+  const search = boardSearch("搜尋任務名稱", state.taskQuery, (value) => { state.taskQuery = value; update(); });
+  const order = boardOrder("任務排序", state.taskOrder, [["priority", owner ? "待確認優先" : "待處理優先"], ["deadline", "截止時間"], ["title", "任務名稱"]], (value) => { state.taskOrder = value; update(); });
+  const filters = owner ? null : boardFilters([["all", `全部 ${d.tasks.length}`], ...Object.entries(taskStatusNames).map(([status, label]) => [status, `${label} ${d.tasks.filter((t) => t.status === status).length}`])], state.taskStatus, (value) => { state.taskStatus = value; filters.update(value); update(); });
+  content.append(node("div", "board-controls", node("div", "board-control-row", search.wrapper, order.wrapper), filters?.container || null), summary, result);
+  update(); currentBoard = { groupId: state.groupId, tab: "tasks", updateClock };
   if (!owner) {
     const archived = d.submissions.filter((s) => s.task_id && !d.tasks.some((t) => t.id === s.task_id));
-    if (archived.length) content.append(node("h2", "spacer-top", "已下架任務的提交紀錄"));
-    for (const submission of archived) content.append(node("article", "list-card", node("div", "", node("h3", "", submission.title),
-      node("p", "feedback-note", submission.feedback || "任務已下架，既有提交與積分紀錄保留。")),
-      button("提交與回饋歷程", () => historyDialog(submission.id, submission.title), "secondary small")));
+    if (archived.length) {
+      const section = node("details", "board-archive", node("summary", "", `已下架任務的提交紀錄 ${archived.length} 筆`), node("p", "muted", "下列歷史紀錄保留原內容，不受上方上架任務篩選影響。"));
+      for (const submission of archived) section.append(node("article", "list-card", node("div", "", node("h3", "", submission.title), node("p", "feedback-note", submission.feedback || "任務已下架，既有提交與積分紀錄保留。")), button("提交與回饋歷程", () => historyDialog(submission.id, submission.title), "secondary small")));
+      content.append(section);
+    }
   }
 }
 function renderReviews(content, d) {
   content.append(node("div", "section-heading", node("h2", "", "看見學生的努力")));
   if (!supportsFeedback(d)) content.append(notice("舊版教室只支援狀態審核；更新服務後可填寫文字回饋與查看歷程。"));
-  const pending = d.submissions.filter((s) => s.status === "pending");
-  if (!pending.length) content.append(empty("目前沒有待確認的提交", "學生完成並提交後，就能在這裡給予回饋。"));
-  for (const submission of pending) {
-    content.append(node("article", "list-card", node("div", "", node("h3", "", submission.title), node("p", "", `${submission.alias} · 第 ${submission.revision || 1} 次提交 · 獎勵 ${submission.points} 教室積分`),
-      node("p", "feedback-note", submission.note || "學生未附文字說明。")),
-      node("div", "actions", button(`通過並核發 ＋${submission.points}`, () => supportsFeedback(d) ? reviewDialog(submission, true) : mutation(`submissions/${submission.id}/review`, { approved: true }, "已通過確認。"), "primary small"),
-        button("請再調整", () => supportsFeedback(d) ? reviewDialog(submission, false) : mutation(`submissions/${submission.id}/review`, { approved: false }, "已更新為請再調整。"), "secondary small"),
-        supportsFeedback(d) ? button("提交與回饋歷程", () => historyDialog(submission.id, submission.title), "secondary small") : null)));
-  }
-  const reviewed = d.submissions.filter((s) => s.status !== "pending");
-  if (reviewed.length) {
-    content.append(node("h2", "spacer-top", "已確認紀錄"));
-    for (const s of reviewed) content.append(node("article", "list-card", node("div", "", node("h3", "", s.title), node("p", "", s.alias), node("p", "feedback-note", s.feedback || "未附文字回饋。")),
-      node("div", "actions", node("span", `badge ${s.status}`, s.status === "approved" ? "已通過" : "請再調整"),
-        supportsFeedback(d) ? button("提交與回饋歷程", () => historyDialog(s.id, s.title), "secondary small") : null)));
-  }
+  content.append(node("p", "board-history-note", "提交紀錄包含已退出成員；時間代表本次提交或處理時間，不是第一次繳交時間。"));
+  const scopeBanner = node("div", "board-scope"), summary = node("p", "board-result-count"), result = node("div", "board-results");
+  summary.setAttribute("role", "status"); summary.setAttribute("aria-live", "polite");
+  const scoped = () => d.submissions.filter((s) => state.reviewTaskId === null || s.task_id === state.reviewTaskId);
+  const clear = () => { state.reviewStatus = "pending"; state.reviewQuery = ""; state.reviewOrder = "oldest"; search.input.value = ""; order.select.value = "oldest"; update(); search.input.focus(); };
+  const update = () => {
+    result.replaceChildren(); scopeBanner.replaceChildren();
+    if (state.reviewTaskId !== null) {
+      const title = d.tasks.find((t) => t.id === state.reviewTaskId)?.title || d.submissions.find((s) => s.task_id === state.reviewTaskId)?.title || "指定任務";
+      scopeBanner.append(node("div", "", node("strong", "", "只查看這項任務"), node("p", "", title)), button("清除任務範圍", () => { state.reviewTaskId = null; update(); search.input.focus(); }, "secondary small"));
+      scopeBanner.hidden = false;
+    } else scopeBanner.hidden = true;
+    const all = scoped(), counts = submissionCounts(all);
+    for (const { value, control } of filterControls) control.textContent = `${value === "all" ? "全部" : taskStatusNames[value]} ${value === "all" ? all.length : counts[value]}`;
+    filters.update(state.reviewStatus);
+    const submissions = selectBoardReviews(d.submissions, state.reviewTaskId, state.reviewStatus, state.reviewQuery, state.reviewOrder);
+    summary.textContent = `目前顯示 ${submissions.length}／${all.length} 筆${state.reviewTaskId !== null ? "此任務的" : "群組"}提交紀錄`;
+    if (!submissions.length) { result.append(empty(all.length ? "目前沒有符合條件的提交" : "這裡還沒有提交紀錄", all.length ? "可切換狀態、搜尋代稱或任務名稱；清除篩選回到待確認清單。" : "學生完成並提交後，就能在這裡給予回饋。", all.length ? button("清除搜尋與篩選", clear, "secondary") : null)); return; }
+    for (const submission of submissions) {
+      const time = validTime(submission.updated_at);
+      const info = node("div", "board-card-content", node("div", "board-card-heading", node("h3", "", submission.title), node("span", `badge ${submission.status}`, taskStatusNames[submission.status] || "待確認狀態")),
+        node("p", "board-student", submission.alias), node("p", "board-revision", `第 ${submission.revision || 1} 次提交 · 通過確認 ＋${submission.points} 分`),
+        node("p", "board-time", `本次提交／處理時間：${time === null ? "舊紀錄未提供時間" : new Date(time * 1000).toLocaleString("zh-TW", { dateStyle: "medium", timeStyle: "short" })}`),
+        boardNote("學生的完成說明", submission.note || "學生未附文字說明。"));
+      if (submission.feedback) info.append(boardNote(submission.status === "pending" ? "前次回饋" : "已留下的回饋", submission.feedback, "feedback"));
+      const actions = node("div", "board-actions");
+      if (submission.status === "pending") actions.append(button(`通過並核發 ＋${submission.points}`, () => supportsFeedback(d) ? reviewDialog(submission, true) : mutation(`submissions/${submission.id}/review`, { approved: true }, "已通過確認。"), "primary small"),
+        button("請再調整", () => supportsFeedback(d) ? reviewDialog(submission, false) : mutation(`submissions/${submission.id}/review`, { approved: false }, "已更新為請再調整。"), "secondary small"));
+      if (supportsFeedback(d)) actions.append(button("提交與回饋歷程", () => historyDialog(submission.id, submission.title), "secondary small"));
+      result.append(node("article", "board-card review", info, actions));
+    }
+  };
+  const search = boardSearch("搜尋學生代稱或任務名稱", state.reviewQuery, (value) => { state.reviewQuery = value; update(); });
+  const order = boardOrder("審核排序", state.reviewOrder, [["oldest", "較早更新優先"], ["newest", "最近更新優先"]], (value) => { state.reviewOrder = value; update(); });
+  const filters = boardFilters([["pending", "待確認"], ["approved", "已通過"], ["rejected", "請調整"], ["all", "全部"]], state.reviewStatus, (value) => { state.reviewStatus = value; update(); });
+  const filterControls = [...filters.container.children].map((control, index) => ({ control, value: ["pending", "approved", "rejected", "all"][index] }));
+  content.append(scopeBanner, node("div", "board-controls", node("div", "board-control-row", search.wrapper, order.wrapper), filters.container), summary, result); update();
 }
 function renderShop(content, d, owner) {
   content.append(node("div", "section-heading", node("h2", "", "把努力，換成喜歡的獎勵"), owner ? button("新增獎勵", () => itemDialog(true), "primary small") : null));
@@ -512,7 +647,7 @@ function accountDialog() {
   const content = node("div", "", node("p", "dialog-description", `${state.user.alias} · ${roleNames[state.user.role]}。帳號 ${state.user.username}。私人城市不會上傳到教室服務。`));
   const actions = node("div", "account-actions");
   if (state.groupId && state.detail?.group.owner_id !== state.user.id) actions.append(button("退出目前教室", () => confirmDialog("退出這個教室？", "退出後無法查看群組資料，既有服務端紀錄仍保留。重新加入需有效邀請碼。", "確認退出", async () => {
-    await api(`groups/${state.groupId}/leave`, {}); state.groupId = null; state.detail = null;
+    await api(`groups/${state.groupId}/leave`, {}); enterGroup(null);
   }, true), "secondary"));
   actions.append(button("刪除服務帳號", deleteAccountDialog, "danger")); content.append(actions);
   openDialog("帳號與資料", content);
@@ -546,6 +681,9 @@ $("hero-join").addEventListener("click", () => authDialog(true, "student"));
 $("service-settings").addEventListener("click", serviceDialog);
 $("close-dialog").addEventListener("click", closeDialog);
 $("modal").addEventListener("cancel", (event) => { if (state.busy) event.preventDefault(); });
+$("modal").addEventListener("close", () => updateVisibleBoardClock());
+document.addEventListener("visibilitychange", () => { if (!document.hidden) updateVisibleBoardClock(); });
+setInterval(updateVisibleBoardClock, 60000);
 async function boot() {
   render();
   $("local-only-note").hidden = !location.hostname.endsWith("github.io");
